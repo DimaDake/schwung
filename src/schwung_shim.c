@@ -7764,6 +7764,16 @@ static void shim_post_transfer(void *ctx, uint8_t *shadow, const uint8_t *hw, in
                 if (cin < 0x08 || cin > 0x0E) continue;
                 if (cable != 0x00) continue;  /* Only internal cable 0 (Move hardware) */
             }
+            /* Cable 14 ("system") carries internal signaling — e.g. the power
+             * button's CC, whose value on a long hold (0x3A = 58) happens to
+             * collide with Move's own Loop-button CC number. It was never
+             * meant to reach a module's regular MIDI dispatch as an ordinary
+             * button press (movy's onMidiMessageInternal receives [status,
+             * d1, d2] with no cable byte to tell the two apart, per
+             * docs/MODULES.md's module contract), so it never should have.
+             * Confirmed on-device: a power-button hold entered movy's Loop
+             * mode via this path. */
+            if (cable == 0x0E) continue;
 
             uint8_t status = src[j + 1];
             uint8_t type = status & 0xF0;

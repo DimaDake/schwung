@@ -3264,6 +3264,7 @@ static void init_shadow_shm(void)
         shadow_control->selected_slot    = 0;
         shadow_control->skip_led_clear   = 0;
         shadow_control->overtake_suppress_sysex = 0;
+        shadow_control->overtake_suppress_master_volume = 0;
         shadow_control->overtake_fx_end_of_chain = 0;
         shadow_control->corun.target = CORUN_TARGET_NONE;  /* co-run inactive at boot */
         shadow_control->corun.id = -1;
@@ -3629,7 +3630,8 @@ static void shadow_swap_display(void)
     if (!shadow_volume_knob_touched) {
         shadow_block_plain_volume_hide_until_release = 0;
     }
-    if (shadow_volume_knob_touched && !shadow_shift_held) {
+    if (shadow_volume_knob_touched && !shadow_shift_held &&
+        !shadow_control->overtake_suppress_master_volume) {
         if (shadow_block_plain_volume_hide_until_release) {
             /* Keep shadow UI visible until shortcut's volume touch is fully released. */
             if (display_hidden_for_volume) {
@@ -6542,6 +6544,12 @@ static void shim_post_transfer(void *ctx, uint8_t *shadow, const uint8_t *hw, in
         /* Run overtake exit hook if it exists (modules install their own cleanup).
          * Skip if suspend_overtake is set — JACK keeps running. */
         if (prev_overtake_mode != 0 && overtake_mode == 0) {
+            /* Belt-and-braces: a stuck suppression permanently breaks the
+             * master volume knob for every module loaded after this one
+             * (unlike overtake_suppress_sysex's equivalent stuck state,
+             * which only affects LEDs). Clear it unconditionally on exit
+             * rather than relying solely on the tool's own endDivert(). */
+            if (shadow_control) shadow_control->overtake_suppress_master_volume = 0;
             if (shadow_control && shadow_control->suspend_overtake) {
                 shadow_control->suspend_overtake = 0;  /* consumed */
                 /* Freeze sysex cache so RNBO's init batch on resume
@@ -6604,6 +6612,11 @@ static void shim_post_transfer(void *ctx, uint8_t *shadow, const uint8_t *hw, in
          * immediately behind it at +248; at the 256 bound the last iteration
          * read that word as a 32nd event and, whenever it looked like a
          * filtered control, ZEROED it. */
+        /* Power-button SysEx run-length: set when the lookahead below matches
+         * the message's first packet, decremented as its remaining 3 packets
+         * are walked. Function-local and re-zeroed every call (one SPI frame
+         * each), so it only ever spans packets within a single frame. */
+        int power_sysex_remaining = 0;
         for (int j = 0; j < SHADOW_MIDI_IN_BYTES; j += 8) {
             uint8_t cin = hw_midi[j] & 0x0F;
             uint8_t cable = (hw_midi[j] >> 4) & 0x0F;
@@ -6611,6 +6624,34 @@ static void shim_post_transfer(void *ctx, uint8_t *shadow, const uint8_t *hw, in
             uint8_t type = status & 0xF0;
             uint8_t d1 = hw_midi[j + 2];
             uint8_t d2 = hw_midi[j + 3];
+
+            /* Power button: F0 00 21 1D 01 01 3A <id> <val> 00 F7, four USB-MIDI
+             * packets (cin 0x4, 0x4, 0x4, 0x6). Unlike every other overtake
+             * button, this one is not a routable CC/note (docs/CORUN.md) — it
+             * only shows up as this SysEx, and the mode-2/mode-1 "status>=0x80"
+             * suppression below zeroes its lead packet (0xF0 counts as a
+             * status byte here) same as it would any other cable-0 SysEx,
+             * corrupting the one message Move's own shutdown-prompt flow needs
+             * intact. The id byte at offset 17 varies (observed 0x2A on a tap,
+             * 0x3A on a ~1.5-2s hold); match on the fixed header + subcommand
+             * only. Lookahead, not a stateful match at the subcommand packet,
+             * because a corrective *retroactive* un-filter of already-written
+             * sh_midi slots would need to special-case every filter site
+             * above instead of the one line below. */
+            int power_sysex_hit = 0;
+            if (power_sysex_remaining > 0) {
+                power_sysex_remaining--;
+                power_sysex_hit = 1;
+            } else if (cable == 0x00 && cin == 0x04 &&
+                       status == 0xF0 && d1 == 0x00 && d2 == 0x21 &&
+                       j + 24 < SHADOW_MIDI_IN_BYTES &&
+                       (hw_midi[j + 8] & 0x0F) == 0x04 &&
+                       hw_midi[j + 9] == 0x1D && hw_midi[j + 10] == 0x01 && hw_midi[j + 11] == 0x01 &&
+                       (hw_midi[j + 16] & 0x0F) == 0x04 && hw_midi[j + 17] == 0x3A &&
+                       (hw_midi[j + 24] & 0x0F) == 0x06) {
+                power_sysex_hit = 1;
+                power_sysex_remaining = 3;
+            }
 
             int filter = 0;
 
@@ -6623,13 +6664,19 @@ static void shim_post_transfer(void *ctx, uint8_t *shadow, const uint8_t *hw, in
                  * - mode 1 (menu): allow only volume touch/turn passthrough */
                 if (overtake_mode == 2) {
                     if (status >= 0x80) filter = 1;
-                    /* Let volume knob CC and touch through so Move shows volume overlay */
-                    if (cin == 0x0B && type == 0xB0 && d1 == CC_MASTER_KNOB) {
+                    /* Let volume knob CC and touch through so Move shows volume overlay
+                     * — unless a tool has claimed the gesture for itself (movy:
+                     * hold a track button + turn master volume) and asked to
+                     * suppress it via overtake_suppress_master_volume, in which
+                     * case this behaves like any other cable-0 event. */
+                    if (cin == 0x0B && type == 0xB0 && d1 == CC_MASTER_KNOB &&
+                        !shadow_control->overtake_suppress_master_volume) {
                         filter = 0;
                     }
                     if ((cin == 0x09 || cin == 0x08) &&
                         (type == 0x90 || type == 0x80) &&
-                        d1 == 8) {
+                        d1 == 8 &&
+                        !shadow_control->overtake_suppress_master_volume) {
                         filter = 0;
                     }
                     /* Per-CC passthrough list (from the module's
@@ -6663,12 +6710,14 @@ static void shim_post_transfer(void *ctx, uint8_t *shadow, const uint8_t *hw, in
                     }
                 } else if (overtake_mode == 1) {
                     filter = 1;
-                    if (cin == 0x0B && type == 0xB0 && d1 == CC_MASTER_KNOB) {
+                    if (cin == 0x0B && type == 0xB0 && d1 == CC_MASTER_KNOB &&
+                        !shadow_control->overtake_suppress_master_volume) {
                         filter = 0;
                     }
                     if ((cin == 0x09 || cin == 0x08) &&
                         (type == 0x90 || type == 0x80) &&
-                        d1 == 8) {
+                        d1 == 8 &&
+                        !shadow_control->overtake_suppress_master_volume) {
                         filter = 0;
                     }
                     /* Same per-CC passthrough list applies at mode 1 (tool
@@ -6716,6 +6765,10 @@ static void shim_post_transfer(void *ctx, uint8_t *shadow, const uint8_t *hw, in
                     }
                 }
             }
+
+            /* Let the power-button SysEx through intact regardless of which
+             * overtake-mode branch above ran — see the lookahead comment. */
+            if (power_sysex_hit) filter = 0;
 
             if (filter) {
                 /* Zero the packet dword in the shadow buffer (slot becomes

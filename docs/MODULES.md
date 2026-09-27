@@ -3547,6 +3547,7 @@ of the same shape — a trig condition, a swing percentage, a clip length.
 Optional and inert when absent.
 
 - It works on enums too, and draws the option (`short_options` first).
+  Turning it raises no option panel: the cell already shows the answer.
 - The text a host supplies through `formatValue` wins when it fits, so `54%`
   can carry its unit.
 - **It must fit.** The face spells `0-9 + - : % / .` and the note names `A-G #`, and the widest thing the

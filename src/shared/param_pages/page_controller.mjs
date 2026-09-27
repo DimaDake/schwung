@@ -38,7 +38,7 @@ import { buildMetaIndex, inferFromValue, isTurnable, flipsOnClick, enumIndexOf, 
 import { renderPage, renderPicker, renderHint, LAYOUT_DIAL } from "./render_page.mjs";
 import { renderPageMovy, drawFooter, drawHeader as drawHeaderMovy, drawBankBar,
          drawBrackets, drawPresetBody, displayValue, RULE_Y, LAYOUT_MOVY,
-         movyHeaderFor, labelForCell, normalizedOf, widgetKindFor,
+         movyHeaderFor, labelForCell, normalizedOf, widgetKindFor, WIDGET_BIGNUM,
          W as SCREEN_WIDTH, FOOTER_Y, FOOTER_H,
          MENU_LIST_X, MENU_LIST_Y, MENU_LIST_W } from "./render_page_movy.mjs";
 import { resolveViz, vizDiveTarget, VIZ_SWITCH, MAX_DECLARED_EXTRA_KEYS } from "./viz.mjs";
@@ -3867,7 +3867,7 @@ export function createController(io = {}) {
          */
         if (s.layout !== LAYOUT_LIST
             && meta.divable && meta.kind === KIND_ENUM
-            && !drawnWide(key) && !drawnAsSwitch(key)
+            && !drawnWide(key) && !drawnAsSwitch(key) && !drawnBig(meta)
             && Array.isArray(meta.options) && meta.options.length >= 2
             && !(allowEnumPeek && allowEnumPeek(fullKey(key), meta) === false)) {
             const pi = Math.round(Number(value));
@@ -5533,6 +5533,24 @@ export function createController(io = {}) {
             if (g.kind === VIZ_SWITCH && Array.isArray(g.keys) && g.keys.indexOf(key) >= 0) return true;
         }
         return false;
+    }
+
+    /*
+     * A BIG CELL ALREADY SHOWS THE OPTION, so it must not peek either.
+     *
+     * `display: "big"` draws an enum's option in the big face, and only when
+     * every option FITS (bigCellFits) -- so the cell is legible by
+     * construction, which is the list-layout case again. Movy could decline
+     * through io.allowEnumPeek, but that hook is the HOST's; a module that
+     * declares `display: "big"` has no hook, and got the panel over its own
+     * readout on every turn.
+     *
+     * Asks the renderer's own widget choice, not the declaration: one that
+     * does not fit falls back to the enum square, which still wants the peek.
+     * Movy only -- the dial renderer does not draw declared big cells.
+     */
+    function drawnBig(meta) {
+        return s.layout === LAYOUT_MOVY && widgetKindFor(meta) === WIDGET_BIGNUM;
     }
 
     /**

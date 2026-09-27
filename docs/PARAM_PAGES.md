@@ -811,6 +811,14 @@ past the list, `drawnWide` or `drawnAsSwitch` gates. Named apart from
 `ctl.enumPeek()`, the getter a frame owner draws from.
 `tests/host/test_enum_peek_hook.sh`.
 
+**A declared BIG enum does not peek (`drawnBig`).** `display: "big"` draws the
+option in the big face only when every option fits, so the cell is legible by
+construction — the list case again, decided in the controller because a MODULE
+declaring it has no `allowEnumPeek` to reach for. It asks the renderer's
+`widgetKindFor`, never the declaration: an unfitting one falls back to the enum
+square and still peeks, and so does the dial layout, which draws no big cell.
+`tests/host/test_big_enum_no_peek.sh`.
+
 Known and not fixed: 933 of 958 enum cells peek, and the peek is instant while
 the enum square's resize and the waveform morph take ~100ms — so those two
 animations are covered by the list at the moment they play. A short delay before
